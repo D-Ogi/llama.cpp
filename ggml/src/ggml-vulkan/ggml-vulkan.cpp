@@ -2930,7 +2930,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     static constexpr uint32_t mul_mat_vec_num_bindings = 5;
     static constexpr uint32_t mul_mat_vec_id_num_bindings = 6;
 
-    if (device->subgroup_arithmetic && device->rdna1_tuning && !getenv("GGML_VK_DISABLE_GATE_UP_FUSION") && !getenv("GGML_VK_DISABLE_FUSION")) {
+    if (device->subgroup_arithmetic && !device->disable_gate_up_fusion && !device->disable_fusion) {
         const uint32_t rows = device->rdna1_tuning && !getenv("GGML_VK_DISABLE_RDNA1_ROWS") ? 4u : 2u;
         const uint32_t width = std::max(16u, subgroup_size);
 #define CREATE_GATE_UP(TYPE, name) \
@@ -4959,6 +4959,10 @@ vk_device ggml_vk_get_device(size_t idx) {
 
         device->rdna1_tuning = device->architecture == AMD_RDNA1 || getenv("GGML_VK_RDNA1_TUNING") != nullptr;
         device->dequant_tuning = device->rdna1_tuning && !getenv("GGML_VK_DISABLE_DEQUANT_TUNING");
+        device->disable_fusion = getenv("GGML_VK_DISABLE_FUSION") != nullptr;
+        // RDNA1 model measurements favor separate projections; keep fusion opt-in.
+        device->disable_gate_up_fusion = !device->rdna1_tuning || !getenv("GGML_VK_ENABLE_GATE_UP_FUSION") ||
+                                        getenv("GGML_VK_DISABLE_GATE_UP_FUSION") != nullptr;
         ggml_vk_load_shaders(device);
 
         // Prefer a dedicated transfer queue on AMD dGPUs (non-GCN) when graphics queue use is disabled.
@@ -4991,8 +4995,6 @@ vk_device ggml_vk_get_device(size_t idx) {
 
         device->serialize_submissions = getenv("GGML_VK_SERIALIZE_SUBMISSIONS") != nullptr;
 
-        device->disable_fusion = getenv("GGML_VK_DISABLE_FUSION") != nullptr;
-        device->disable_gate_up_fusion = !device->rdna1_tuning || getenv("GGML_VK_DISABLE_GATE_UP_FUSION") != nullptr;
         GGML_LOG_INFO("ggml_vulkan: %s: detected_rdna1=%u rdna1_rows=%u dequant_tuning=%u gate_up_fusion=%u packed_f16=%u\n",
             device->name.c_str(), unsigned(device->architecture == AMD_RDNA1),
             unsigned(device->rdna1_tuning && !getenv("GGML_VK_DISABLE_RDNA1_ROWS")),

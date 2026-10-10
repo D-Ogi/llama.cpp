@@ -34,13 +34,18 @@ The default gate is the backend's existing `AMD_RDNA1` classification. The
 classifier uses AMD vendor identity, subgroup limits of 32 and 64, the required
 property extensions and `wavefrontsPerSimd == 20`. A device name alone does not
 select the path. Startup prints the detected classification and each switch.
+Rows, decode arithmetic and packed FP16 are enabled by default on RDNA1.
+Gate/up fusion requires an explicit opt-in: matched gfx1013 model runs showed
+slower decode with this fusion. It does not apply to multi-token prefill.
 
 All switches below are presence-based, as are upstream's other Vulkan switches.
 Unset a switch to restore its normal default. Any value, including `0`, activates
-a `DISABLE` switch. Presence of `GGML_VK_RDNA1_TUNING` enables the test override.
+a `DISABLE` switch. Presence of `GGML_VK_RDNA1_TUNING` enables the test override,
+but does not enable gate/up fusion. The enable switch is also presence-based.
 
 | Environment variable | Effect when set |
 | --- | --- |
+| `GGML_VK_ENABLE_GATE_UP_FUSION` | Opt into dual-projection/GLU fusion on an RDNA1 tuning device. |
 | `GGML_VK_DISABLE_GATE_UP_FUSION` | Disable the new dual-projection/GLU fusion. |
 | `GGML_VK_DISABLE_RDNA1_ROWS` | Restore upstream scalar mat-vec row counts. |
 | `GGML_VK_DISABLE_DEQUANT_TUNING` | Restore the original decode arithmetic and MXFP4 LUT. |
@@ -48,6 +53,8 @@ a `DISABLE` switch. Presence of `GGML_VK_RDNA1_TUNING` enables the test override
 | `GGML_VK_DISABLE_FUSION` | Disable all backend graph fusion, including upstream fusion. |
 | `GGML_VK_RDNA1_TUNING` | Test override: enable the tuning on a different Vulkan device. |
 
+Both fusion disable switches take precedence over the gate/up enable switch.
+Shader creation and graph selection use the same effective fusion choice.
 The override is for correctness tests, not automatic device detection. On a
 device with matrix units, disable cooperative matrices and integer dot products
 as well when testing the scalar prefill path. The lab comparison should use the
@@ -96,7 +103,10 @@ for this compiler check. Runtime correctness and model speed are separate tests.
 
 For a baseline that keeps upstream graph fusion, set all four per-change
 disable variables. Compare it with the same executable with those variables
-unset. Then disable one change at a time. `GGML_VK_DISABLE_FUSION` is an extra
+unset. Gate/up fusion remains off in the default candidate; use
+`GGML_VK_ENABLE_GATE_UP_FUSION` for its separate measurement. To reproduce the
+original all-on comparison, set that enable switch, then disable one change at
+a time. `GGML_VK_DISABLE_FUSION` is an extra
 control that also removes upstream fusion; it is not the isolated new-fusion
 comparison.
 
