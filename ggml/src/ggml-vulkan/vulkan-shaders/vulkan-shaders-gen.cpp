@@ -341,6 +341,13 @@ compile_count_guard acquire_compile_slot() {
     // wait until fewer than N compiles are in progress.
     // 16 is an arbitrary limit, the goal is to avoid "failed to create pipe" errors.
     uint32_t N = std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+    if (const char * limit = std::getenv("GGML_VULKAN_SHADER_MAX_JOBS")) {
+        char * end = nullptr;
+        const unsigned long jobs = std::strtoul(limit, &end, 10);
+        if (end != limit && *end == '\0' && jobs >= 1 && jobs <= 16) {
+            N = std::min(N, static_cast<uint32_t>(jobs));
+        }
+    }
     std::unique_lock<std::mutex> guard(compile_count_mutex);
     compile_count_cond.wait(guard, [N] { return compile_count < N; });
     compile_count++;
@@ -779,10 +786,31 @@ void process_shaders() {
 
     std::map<std::string, std::string> base_dict = {{"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}};
 
+    const std::vector<std::string> gate_up_mixed_types = {
+        "q2_k", "q4_k", "iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s", "iq4_xs",
+    };
+    for (const auto & gate : gate_up_mixed_types) {
+        for (const auto & up : gate_up_mixed_types) {
+            auto mixed_dict = merge_maps(base_dict, {{"DATA_A_" + to_uppercase(gate), "1"},
+                {"DATA_UP_" + to_uppercase(up), "1"}, {"GATE_UP_MIXED", "1"}, {"D_TYPE", "float"}});
+            string_to_spv("gate_up_" + gate + "_" + up, "mul_mat_vec_gate_up.comp", mixed_dict);
+            mixed_dict["MUL_MAT_ID"] = "1";
+            string_to_spv("gate_up_id_" + gate + "_" + up, "mul_mat_vec_gate_up.comp", mixed_dict);
+        }
+    }
+
     for (const auto& tname : type_names) {
         // mul mat vec
         std::string data_a_key = "DATA_A_" + to_uppercase(tname);
         std::string shader = (string_ends_with(tname, "_k") || string_starts_with(tname, "iq1_") || string_starts_with(tname, "iq2_") || string_starts_with(tname, "iq3_") || tname == "iq4_xs" || tname == "tq2_0" || tname == "tq1_0") ? "mul_mat_vec_" + tname + ".comp" : "mul_mat_vec.comp";
+
+        if (tname == "q4_0" || tname == "q8_0" || tname == "mxfp4" || is_k_quant(tname) ||
+            string_starts_with(tname, "iq")) {
+            auto fused_dict = merge_maps(base_dict, {{data_a_key, "1"}, {"FLOAT_TYPE", "float"}, {"D_TYPE", "float"}});
+            string_to_spv("gate_up_" + tname, "mul_mat_vec_gate_up.comp", fused_dict);
+            fused_dict["MUL_MAT_ID"] = "1";
+            string_to_spv("gate_up_id_" + tname, "mul_mat_vec_gate_up.comp", fused_dict);
+        }
 
         string_to_spv("mul_mat_vec_" + tname + "_f32_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float"}, {"B_TYPEV2", "vec2"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}}));
         string_to_spv("mul_mat_vec_" + tname + "_f16_f32", shader, merge_maps(base_dict, {{data_a_key, "1"}, {"B_TYPE", "float16_t"}, {"B_TYPEV2", "f16vec2"}, {"B_TYPEV4", "f16vec4"}, {"D_TYPE", "float"}}));

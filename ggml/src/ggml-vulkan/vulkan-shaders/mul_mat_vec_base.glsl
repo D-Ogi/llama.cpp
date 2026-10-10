@@ -11,6 +11,9 @@
 #define EXPERT_COUNT 8
 #endif
 
+#define MAT_VEC_DEQUANT_TUNING
+layout (constant_id = 3) const bool DEQUANT_OPT = false;
+
 #include "mul_mat_vec_iface.glsl"
 
 layout (push_constant) uniform parameter

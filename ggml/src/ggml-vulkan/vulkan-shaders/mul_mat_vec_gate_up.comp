@@ -1,0 +1,251 @@
+#version 450
+
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// PROVENANCE: TechMakesArt/llama.cpp-bc250 (MIT), fused gate/up mat-vec design.
+#define MAT_VEC_DEQUANT_TUNING
+layout(constant_id = 3) const bool DEQUANT_OPT = false;
+#include "types.glsl"
+#include "mul_mat_vec_gate_up_types.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 0) const uint BLOCK_SIZE = 32;
+layout(constant_id = 1) const uint NUM_ROWS = 2;
+
+layout(binding = 0) readonly buffer Gate { A_TYPE data_a[]; };
+layout(binding = 1) readonly buffer Up { UP_TYPE data_up[]; };
+#ifdef A_TYPE_PACKED16
+layout(binding = 0) readonly buffer Gate16 { A_TYPE_PACKED16 data_a_packed16[]; };
+#endif
+#ifdef A_TYPE_PACKED32
+layout(binding = 0) readonly buffer Gate32 { A_TYPE_PACKED32 data_a_packed32[]; };
+#endif
+#ifdef UP_TYPE_PACKED16
+layout(binding = 1) readonly buffer Up16 { UP_TYPE_PACKED16 data_up_packed16[]; };
+#endif
+#ifdef UP_TYPE_PACKED32
+layout(binding = 1) readonly buffer Up32 { UP_TYPE_PACKED32 data_up_packed32[]; };
+#endif
+layout(binding = 2) readonly buffer Input { float data_b[]; };
+layout(binding = 2) readonly buffer Input4 { vec4 data_b4[]; };
+layout(binding = 3) writeonly buffer Output { float data_d[]; };
+layout(binding = 4) readonly buffer Ids { int data_ids[]; };
+layout(binding = 5) readonly buffer GateBias { float data_gate_bias[]; };
+layout(binding = 6) readonly buffer UpBias { float data_up_bias[]; };
+
+layout(push_constant) uniform parameter {
+    uint ncols;
+    uint nrows;
+    uint ne02;
+    uint ne12;
+    uint broadcast2;
+    uint broadcast3;
+    uint ne11;
+    uint n_experts;
+    uint glu_op;
+    uint has_bias;
+    uint weight_ne3;
+    uint weight_rows;
+    uint gate_row;
+    uint up_row;
+    float alpha;
+    float limit;
+} p;
+
+#include "dequant_funcs.glsl"
+#if defined(GATE_UP_MIXED) && (defined(DATA_A_Q2_K) || defined(DATA_A_Q4_K))
+vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
+    return vec4(dequantize(ib, iqs, a_offset), dequantize(ib, iqs + 2, a_offset));
+}
+#endif
+#if defined(DATA_A_Q4_K) && !defined(GATE_UP_MIXED)
+#define GATE_UP_Q4_K_DOT gate_q4_k_dot
+#include "mul_mat_vec_gate_up_q4_k.glsl"
+#undef GATE_UP_Q4_K_DOT
+#endif
+#define data_a data_up
+#define data_a_packed16 data_up_packed16
+#define data_a_packed32 data_up_packed32
+#define dequantize dequantize_up
+#define dequantize4 dequantize4_up
+#define get_dm get_dm_up
+#ifdef GATE_UP_MIXED
+#include "mul_mat_vec_gate_up_select.glsl"
+#endif
+#include "dequant_funcs.glsl"
+#if defined(GATE_UP_MIXED) && (defined(DATA_A_Q2_K) || defined(DATA_A_Q4_K))
+vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
+    return vec4(dequantize(ib, iqs, a_offset), dequantize(ib, iqs + 2, a_offset));
+}
+#endif
+#if defined(DATA_A_Q4_K) && !defined(GATE_UP_MIXED)
+#define GATE_UP_Q4_K_DOT up_q4_k_dot
+#include "mul_mat_vec_gate_up_q4_k.glsl"
+#undef GATE_UP_Q4_K_DOT
+#endif
+#undef data_a
+#undef data_a_packed16
+#undef data_a_packed32
+#undef dequantize
+#undef dequantize4
+#undef get_dm
+
+float gate_op(float a, float b) {
+    switch (p.glu_op) {
+        case 0: return max(a, 0.0) * b;
+        case 1: {
+            const float val = 0.79788456080286535587989211986876 * a * (1.0 + 0.044715 * a * a);
+            return 0.5 * a * (2.0 - 2.0 / (exp(2 * val) + 1)) * b;
+        }
+        case 2: return a / (1.0 + exp(-a)) * b;
+        case 3: {
+            const float xi = min(a, p.limit);
+            const float gi = max(min(b, p.limit), -p.limit);
+            return (xi / (1.0 + exp(-xi * p.alpha))) * (1.0 + gi);
+        }
+        case 4: {
+            const float x0 = a * 0.70710678118654752440084436210484;
+            const float x = abs(x0);
+            const float t = 1.0 / (1.0 + 0.3275911 * x);
+            const float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x * x);
+            return 0.5 * a * (1.0 + sign(x0) * y) * b;
+        }
+        case 5: return a * (1.0 / (1.0 + exp(-1.702 * a))) * b;
+        case 6: {
+            const float gate = min(a, p.limit);
+            return gate / (1.0 + exp(-gate)) * clamp(b, -p.limit, p.limit);
+        }
+    }
+    return 0.0;
+}
+
+shared vec2 partials[NUM_ROWS][BLOCK_SIZE];
+
+void main() {
+#ifdef NEEDS_INIT_IQ_SHMEM
+    init_iq_shmem(gl_WorkGroupSize);
+#endif
+    const uint tid = gl_LocalInvocationID.x;
+    const uint batch = gl_WorkGroupID.y;
+    const uint row0 = NUM_ROWS * gl_WorkGroupID.x;
+#ifdef MUL_MAT_ID
+    const int expert = data_ids[batch];
+    // Bad IDs must not turn the optimized path into an out-of-bounds weight read.
+    if (expert < 0 || uint(expert) >= p.n_experts) {
+        return;
+    }
+    const uint weight_batch = uint(expert);
+    const uint input_batch = batch % p.ne11;
+#else
+    const uint weight_batch = ((batch / p.ne12) / p.broadcast3) * p.ne02 + (batch % p.ne12) / p.broadcast2;
+    const uint input_batch = batch;
+#endif
+    const uint gate_offset = (weight_batch * p.weight_rows + p.gate_row) * (p.ncols / QUANT_K);
+    const uint up_offset = (weight_batch * p.weight_rows + p.up_row) * (p.ncols / QUANT_K);
+    const uint b_offset = input_batch * p.ncols;
+    vec2 sums[NUM_ROWS];
+    [[unroll]] for (uint r = 0; r < NUM_ROWS; ++r) {
+        sums[r] = vec2(0.0);
+    }
+
+#if defined(DATA_A_Q4_K) && !defined(GATE_UP_MIXED)
+    const uint itid = tid % 16;
+    const uint il = itid / 4;
+    const uint ir = itid % 4;
+    const uint v_im = il / 2;
+    const uint l0 = 4 * (2 * ir + il % 2);
+    const uint q_offset = 32 * v_im + l0;
+    const uint y_offset = 64 * v_im + l0;
+    const uint blocks_per_row = p.ncols / QUANT_K;
+    for (uint i = tid / 16; i < blocks_per_row; i += BLOCK_SIZE / 16) {
+        const uint bidx = (b_offset + i * QUANT_K + y_offset) / 4;
+        const vec4 b0 = data_b4[bidx];
+        const vec4 b1 = data_b4[bidx + 8];
+        const vec4 b2 = data_b4[bidx + 32];
+        const vec4 b3 = data_b4[bidx + 40];
+        [[unroll]] for (uint r = 0; r < NUM_ROWS; ++r) {
+            if (row0 + r < p.nrows) {
+                const uint ib = (row0 + r) * blocks_per_row + i;
+                sums[r].x = gate_q4_k_dot(gate_offset + ib, v_im, q_offset, b0, b1, b2, b3, sums[r].x);
+                sums[r].y = up_q4_k_dot(up_offset + ib, v_im, q_offset, b0, b1, b2, b3, sums[r].y);
+            }
+        }
+    }
+#elif defined(DATA_A_QUANT_K) && !defined(GATE_UP_MIXED)
+    // The K-quant scalar helper returns two consecutive fully scaled weights.
+    for (uint col = 2 * tid; col < p.ncols; col += 2 * BLOCK_SIZE) {
+        const vec2 b = vec2(data_b[b_offset + col], data_b[b_offset + col + 1]);
+        [[unroll]] for (uint r = 0; r < NUM_ROWS; ++r) {
+            if (row0 + r < p.nrows) {
+                const uint ib = (row0 + r) * (p.ncols / QUANT_K) + col / QUANT_K;
+                sums[r] += vec2(dot(b, dequantize(ib, col % QUANT_K, gate_offset)),
+                                dot(b, dequantize_up(ib, col % QUANT_K, up_offset)));
+            }
+        }
+    }
+#else
+    for (uint col = 8 * tid; col < p.ncols; col += 8 * BLOCK_SIZE) {
+        const uint iqs = (col % QUANT_K) / QUANT_R;
+        const uint block_col = col - col % QUANT_K;
+#if QUANT_R == 2
+        const uint bcol = b_offset + block_col + iqs;
+        const uint half_block = QUANT_K / 2;
+        const vec4 b0 = vec4(data_b[bcol], data_b[bcol + half_block], data_b[bcol + 1], data_b[bcol + half_block + 1]);
+        const vec4 b1 = vec4(data_b[bcol + 2], data_b[bcol + half_block + 2], data_b[bcol + 3], data_b[bcol + half_block + 3]);
+#else
+        const uint bcol = b_offset + col;
+        const vec4 b0 = vec4(data_b[bcol], data_b[bcol + 1], data_b[bcol + 2], data_b[bcol + 3]);
+        const vec4 b1 = vec4(data_b[bcol + 4], data_b[bcol + 5], data_b[bcol + 6], data_b[bcol + 7]);
+#endif
+        [[unroll]] for (uint r = 0; r < NUM_ROWS; ++r) {
+            if (row0 + r < p.nrows) {
+                const uint ib = (row0 + r) * (p.ncols / QUANT_K) + col / QUANT_K;
+                const vec2 gdm = get_dm(ib, gate_offset);
+                const vec2 udm = get_dm_up(ib, up_offset);
+                vec4 g0 = dequantize4(ib, iqs, gate_offset);
+                vec4 g1 = dequantize4(ib, iqs + 4 / QUANT_R, gate_offset);
+                vec4 u0 = dequantize4_up(ib, iqs, up_offset);
+                vec4 u1 = dequantize4_up(ib, iqs + 4 / QUANT_R, up_offset);
+                if (gdm.y != 0.0) { g0 = g0 * gdm.x + gdm.y; g1 = g1 * gdm.x + gdm.y; }
+                if (udm.y != 0.0) { u0 = u0 * udm.x + udm.y; u1 = u1 * udm.x + udm.y; }
+                float g = dot(b0, g0) + dot(b1, g1);
+                float u = dot(b0, u0) + dot(b1, u1);
+                if (gdm.y == 0.0) { g *= gdm.x; }
+                if (udm.y == 0.0) { u *= udm.x; }
+                sums[r] += vec2(g, u);
+            }
+        }
+    }
+#endif
+
+    [[unroll]] for (uint r = 0; r < NUM_ROWS; ++r) {
+        const vec2 sum = subgroupAdd(sums[r]);
+        if (gl_SubgroupInvocationID == 0) {
+            partials[r][gl_SubgroupID] = sum;
+        }
+    }
+    barrier();
+    if (tid == 0) {
+        [[unroll]] for (uint r = 0; r < NUM_ROWS; ++r) {
+            if (row0 + r < p.nrows) {
+                vec2 sum = vec2(0.0);
+                for (uint s = 0; s < gl_NumSubgroups; ++s) { sum += partials[r][s]; }
+                if (p.has_bias != 0) {
+#ifdef MUL_MAT_ID
+                    const uint bias_idx = weight_batch * p.weight_rows + row0 + r;
+#else
+                    // ADD repeats by modulo, while MUL_MAT broadcasts batches by quotient.
+                    const uint bias_batch = ((batch / p.ne12) % p.weight_ne3) * p.ne02 + (batch % p.ne12) % p.ne02;
+                    const uint bias_idx = bias_batch * p.weight_rows + row0 + r;
+#endif
+                    sum += vec2(data_gate_bias[bias_idx + p.gate_row], data_up_bias[bias_idx + p.up_row]);
+                }
+                data_d[batch * p.nrows + row0 + r] = gate_op(sum.x, sum.y);
+            }
+        }
+    }
+}

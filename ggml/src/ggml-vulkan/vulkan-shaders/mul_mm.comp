@@ -50,6 +50,24 @@ layout (constant_id = 12) const uint MmTypeA = 0;
 
 layout (constant_id = 11) const uint ALIGNED = 0;
 
+#if defined(ACC_TYPE_MAX) && !defined(DOT2_F16) && !defined(COOPMAT)
+layout (constant_id = 15) const bool PACKED_F16_DOT = false;
+
+// Pair independent output rows. Each lane keeps the scalar dot product's
+// accumulation order and FP16 precision; this does not narrow FP32 accumulators.
+ACC_TYPEV2 dot_product_rows(FLOAT_TYPEV2 a0, FLOAT_TYPEV2 a1, FLOAT_TYPEV2 b, ACC_TYPEV2 acc) {
+    return fma(ACC_TYPEV2(a0.x, a1.x), ACC_TYPEV2(b.x),
+           fma(ACC_TYPEV2(a0.y, a1.y), ACC_TYPEV2(b.y), acc));
+}
+
+ACC_TYPEV2 dot_product_rows(FLOAT_TYPEV4 a0, FLOAT_TYPEV4 a1, FLOAT_TYPEV4 b, ACC_TYPEV2 acc) {
+    return fma(ACC_TYPEV2(a0.x, a1.x), ACC_TYPEV2(b.x),
+           fma(ACC_TYPEV2(a0.y, a1.y), ACC_TYPEV2(b.y),
+           fma(ACC_TYPEV2(a0.z, a1.z), ACC_TYPEV2(b.z),
+           fma(ACC_TYPEV2(a0.w, a1.w), ACC_TYPEV2(b.w), acc))));
+}
+#endif
+
 #ifdef MULMAT_QUANT
 
 uint mm_load_vec_a() {
@@ -431,8 +449,16 @@ void main() {
                         [[unroll]] for (uint cr = 0; cr < TM / 2; cr++) {
                             // [WNITER][TN][WMITER][TM / 2] -> [wsic][cc][wsir][cr]
                             const uint sums_idx = (wsic * TN + cc) * WMITER * (TM / 2) + wsir * (TM / 2) + cr;
-                            sums[sums_idx].x = dot_product(cache_a[wsir * TM + 2 * cr    ], cache_b, sums[sums_idx].x);
-                            sums[sums_idx].y = dot_product(cache_a[wsir * TM + 2 * cr + 1], cache_b, sums[sums_idx].y);
+#if defined(ACC_TYPE_MAX) && !defined(DOT2_F16) && !defined(COOPMAT)
+                            if (PACKED_F16_DOT) {
+                                sums[sums_idx] = dot_product_rows(cache_a[wsir * TM + 2 * cr],
+                                    cache_a[wsir * TM + 2 * cr + 1], cache_b, sums[sums_idx]);
+                            } else
+#endif
+                            {
+                                sums[sums_idx].x = dot_product(cache_a[wsir * TM + 2 * cr    ], cache_b, sums[sums_idx].x);
+                                sums[sums_idx].y = dot_product(cache_a[wsir * TM + 2 * cr + 1], cache_b, sums[sums_idx].y);
+                            }
                         }
                     }
                 }

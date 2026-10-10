@@ -65,10 +65,22 @@ vec4 dequantize4_2aligned(uint ib, uint iqs, uint a_offset) {
 #if defined(DATA_A_Q4_0)
 vec2 dequantize(uint ib, uint iqs, uint a_offset) {
     const uint vui = uint(data_a[a_offset + ib].qs[iqs]);
+#ifdef MAT_VEC_DEQUANT_TUNING
+    if (DEQUANT_OPT) {
+        const int v = int(vui ^ 0x88u);
+        return vec2(bitfieldExtract(v, 0, 4), bitfieldExtract(v, 4, 4));
+    }
+#endif
     return (vec2(vui & 0xF, vui >> 4) - 8.0f);
 }
 vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
     const uint vui = uint(data_a_packed16[a_offset + ib].qs[iqs/2]);
+#ifdef MAT_VEC_DEQUANT_TUNING
+    if (DEQUANT_OPT) {
+        const int v = int(vui ^ 0x8888u);
+        return vec4(bitfieldExtract(v, 0, 4), bitfieldExtract(v, 4, 4), bitfieldExtract(v, 8, 4), bitfieldExtract(v, 12, 4));
+    }
+#endif
     return (vec4(vui & 0xF, (vui >> 4) & 0xF, (vui >> 8) & 0xF, vui >> 12) - 8.0f);
 }
 #endif
@@ -265,6 +277,11 @@ vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
     // Add parity bit
     const uint sign8 = sign7 | (bitCount(sign7) << 7);
     const uint sign = sign8 >> (iqs % 8);
+#ifdef MAT_VEC_DEQUANT_TUNING
+    if (DEQUANT_OPT) {
+        return db * signed_iq_grid(iq2xxs_grid[qs][(iqs % 8) / 4] >> (8 * (iqs % 4)), sign);
+    }
+#endif
     const u8vec4 grid = unpack8(iq2xxs_grid[qs][(iqs % 8) / 4] >> (8 * (iqs % 4)));
     bool sign0 = (sign & 1) != 0;
     bool sign1 = (sign & 2) != 0;
@@ -304,6 +321,11 @@ vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
     // Add parity bit
     const uint sign8 = sign7 | (bitCount(sign7) << 7);
     const uint sign = sign8 >> (iqs % 8);
+#ifdef MAT_VEC_DEQUANT_TUNING
+    if (DEQUANT_OPT) {
+        return db * signed_iq_grid(iq2xs_grid[qs & 511][(iqs % 8) / 4] >> (8 * (iqs % 4)), sign);
+    }
+#endif
     const u8vec4 grid = unpack8(iq2xs_grid[qs & 511][(iqs % 8) / 4] >> (8 * (iqs % 4)));
     bool sign0 = (sign & 1) != 0;
     bool sign1 = (sign & 2) != 0;
@@ -349,6 +371,11 @@ vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
     const uint sign = data_a[a_offset + ib].qs[QUANT_K / 8 + ib8] >> (iqs % 8);
 
     const float db = 0.25 * (0.5 + scale);
+#ifdef MAT_VEC_DEQUANT_TUNING
+    if (DEQUANT_OPT) {
+        return db * signed_iq_grid(iq2s_grid[qs | ((qh << (8 - qhshift)) & 0x300)][(iqs % 8) / 4], sign);
+    }
+#endif
     const u8vec4 grid = unpack8(iq2s_grid[qs | ((qh << (8 - qhshift)) & 0x300)][(iqs % 8) / 4]);
     bool sign0 = (sign & 1) != 0;
     bool sign1 = (sign & 2) != 0;
@@ -397,6 +424,11 @@ vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
     // Add parity bit
     const uint sign8 = sign7 | (bitCount(sign7) << 7);
     const uint sign = sign8 >> (iqs % 8);
+#ifdef MAT_VEC_DEQUANT_TUNING
+    if (DEQUANT_OPT) {
+        return db * signed_iq_grid(iq3xxs_grid[qs], sign);
+    }
+#endif
     const u8vec4 grid = unpack8(iq3xxs_grid[qs]);
     bool sign0 = (sign & 1) != 0;
     bool sign1 = (sign & 2) != 0;
@@ -439,6 +471,11 @@ vec4 dequantize4(uint ib, uint iqs, uint a_offset) {
     bool sign3 = (sign & 8) != 0;
     const float db = 1 + 2 * ((scale >> (4 * (ib32 & 1))) & 0xf);
     const uint32_t grid = iq3s_grid[qs | ((qh << (8 - ib4 % 8)) & 256)] >> (8 * (iqs % 4));
+#ifdef MAT_VEC_DEQUANT_TUNING
+    if (DEQUANT_OPT) {
+        return db * signed_iq_grid(grid, sign);
+    }
+#endif
     return db * vec4(
         int(grid & 0xFF) * (sign0 ? -1.0 : 1.0),
         int((grid >> 8) & 0xFF) * (sign1 ? -1.0 : 1.0),
@@ -495,6 +532,11 @@ vec2 dequantize(uint ib, uint iqs, uint a_offset) {
 #ifdef USE_OCP_FP4
     return vec2(unpackFloat2xfe2m1EXT(uint8_t(vui)));
 #else
+#ifdef MAT_VEC_DEQUANT_TUNING
+    if (DEQUANT_OPT) {
+        return vec2(mxfp4_value(vui), mxfp4_value(vui >> 4));
+    }
+#endif
     return vec2(kvalues_mxfp4[vui & 0xF], kvalues_mxfp4[vui >> 4]) * 0.5;
 #endif
 }

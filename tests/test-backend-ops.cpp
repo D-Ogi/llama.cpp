@@ -7720,6 +7720,121 @@ struct test_mul_mat_vec_fusion : public test_case {
     }
 };
 
+struct test_quant_gate_up : public test_mul_mat_vec_fusion {
+    const ggml_type type_up;
+    const int layout; // -1: separate weights; 0/1: merged GLU; 2/3: merged views
+
+    test_quant_gate_up(ggml_type type, ggml_type type_up, int layout, bool use_id, bool broadcast,
+                      bool bias, ggml_glu_op glu_op)
+        : test_mul_mat_vec_fusion(type, glu_op, 1, 33, 768, use_id, 4, 2, broadcast, bias, true, false, {1, 1}),
+          type_up(type_up), layout(layout) {}
+
+    std::string vars() override { return test_mul_mat_vec_fusion::vars() + "," + VAR_TO_STR(type_up) + "," + VAR_TO_STR(layout); }
+    std::string op_desc(ggml_tensor *) override { return layout < 0 ? "MUL_MAT_GATE_UP_MIXED" : "MUL_MAT_GATE_UP_MERGED"; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, use_id && !b ? n_used : 1, 1);
+        ggml_tensor * ids = nullptr;
+        if (use_id) {
+            ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_mats, 1);
+            ids = ggml_view_2d(ctx, ids, n_used, 1, ids->nb[1], 0);
+        }
+        const auto mul_add = [&](ggml_tensor * weights, int64_t rows) {
+            ggml_tensor * out = use_id ? ggml_mul_mat_id(ctx, weights, cur, ids) : ggml_mul_mat(ctx, weights, cur);
+            if (with_bias) {
+                ggml_tensor * bias = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, rows, use_id ? n_mats : 1);
+                out = use_id ? ggml_add_id(ctx, out, bias, ids) : ggml_add(ctx, out, bias);
+            }
+            return out;
+        };
+        if (layout < 0) {
+            ggml_tensor * up = ggml_new_tensor_3d(ctx, type_up, k, n, use_id ? n_mats : 1);
+            ggml_tensor * gate = ggml_new_tensor_3d(ctx, type, k, n, use_id ? n_mats : 1);
+            ggml_tensor * up_out = mul_add(up, n);
+            ggml_tensor * gate_out = mul_add(gate, n);
+            return build_gate(ctx, gate_out, up_out);
+        }
+        ggml_tensor * weights = ggml_new_tensor_3d(ctx, type, k, 2*n, use_id ? n_mats : 1);
+        ggml_tensor * both = mul_add(weights, 2*n);
+        if (layout < 2) {
+            return ggml_glu(ctx, both, glu_op, layout == 1);
+        }
+        ggml_tensor * first = ggml_view_3d(ctx, both, n, both->ne[1], both->ne[2], both->nb[1], both->nb[2], 0);
+        ggml_tensor * second = ggml_view_3d(ctx, both, n, both->ne[1], both->ne[2], both->nb[1], both->nb[2], n*sizeof(float));
+        return layout == 2 ? build_gate(ctx, second, first) : build_gate(ctx, first, second);
+    }
+};
+
+struct test_mul_mat_prefill : public test_mul_mat {
+    const ggml_prec prec;
+
+    test_mul_mat_prefill(ggml_type type, int64_t tokens, ggml_prec prec)
+        : test_mul_mat(type, GGML_TYPE_F32, 65, tokens, 768, {1, 1}, {1, 1}), prec(prec) {}
+
+    std::string vars() override { return test_mul_mat::vars() + "," + VAR_TO_STR(prec); }
+    std::string op_desc(ggml_tensor *) override { return "MUL_MAT_PREFILL"; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * out = test_mul_mat::build_graph(ctx);
+        ggml_prec_set_acc(out, prec);
+        return out;
+    }
+};
+
+struct test_gate_up_bias_broadcast : public test_case {
+    const bool broadcast_dim3;
+
+    explicit test_gate_up_bias_broadcast(bool broadcast_dim3) : broadcast_dim3(broadcast_dim3) {}
+
+    std::string vars() override { return VAR_TO_STR(broadcast_dim3); }
+    std::string op_desc(ggml_tensor *) override { return "MUL_MAT_GATE_UP_BIAS_BROADCAST"; }
+    bool run_whole_graph() override { return true; }
+    double max_nmse_err() override { return 5e-3; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * cur = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 768, 1, 4, broadcast_dim3 ? 4 : 2);
+        ggml_tensor * gate = ggml_new_tensor_4d(ctx, GGML_TYPE_Q4_K, 768, 33, 2, 2);
+        ggml_tensor * up = ggml_new_tensor_4d(ctx, GGML_TYPE_Q4_K, 768, 33, 2, 2);
+        ggml_tensor * gate_bias = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 33, 1, 2, 2);
+        ggml_tensor * up_bias = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 33, 1, 2, 2);
+        ggml_tensor * up_out = ggml_add(ctx, ggml_mul_mat(ctx, up, cur), up_bias);
+        ggml_tensor * gate_out = ggml_add(ctx, ggml_mul_mat(ctx, gate, cur), gate_bias);
+        return ggml_swiglu_split(ctx, gate_out, up_out);
+    }
+};
+
+struct test_gate_up_fallback : public test_case {
+    const int variant;
+
+    explicit test_gate_up_fallback(int variant) : variant(variant) {}
+
+    std::string vars() override { return VAR_TO_STR(variant); }
+    std::string op_desc(ggml_tensor *) override { return "MUL_MAT_GATE_UP_FALLBACK"; }
+    bool run_whole_graph() override { return true; }
+    double max_nmse_err() override { return 5e-3; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        const int64_t k = 768;
+        const int64_t n = 33;
+        ggml_tensor * cur = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, k, 1);
+        ggml_tensor * gate = ggml_new_tensor_2d(ctx, variant == 0 ? GGML_TYPE_Q8_0 : GGML_TYPE_Q4_K, variant == 2 ? 1024 : k, n);
+        ggml_tensor * up = ggml_new_tensor_2d(ctx, variant == 0 ? GGML_TYPE_IQ2_XS : GGML_TYPE_Q4_K, k, n);
+        if (variant == 2) {
+            gate = ggml_view_2d(ctx, gate, k, n, gate->nb[1], 0);
+        }
+        ggml_tensor * gate_out = ggml_mul_mat(ctx, gate, cur);
+        ggml_tensor * up_out = ggml_mul_mat(ctx, up, cur);
+        if (variant == 3) {
+            ggml_set_output(up_out);
+        }
+        ggml_tensor * out = ggml_swiglu_split(ctx, gate_out, up_out);
+        if (variant == 1) {
+            out = ggml_add(ctx, out, up_out);
+        }
+        return out;
+    }
+};
+
 // GGML_OP_SUM
 struct test_sum : public test_case {
     const ggml_type type;
@@ -11798,6 +11913,96 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (bool b : {false, true}) {
         test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_IQ2_S, GGML_GLU_OP_SWIGLU_CLAMP, 1, 32, 256,
             true, 16, 8, b, false, true, false));
+    }
+
+    // Real mixed-quant gate/up combinations plus a ring spanning every admitted format.
+    const std::pair<ggml_type, ggml_type> mixed_gate_types[] = {
+        {GGML_TYPE_IQ1_S, GGML_TYPE_IQ2_XXS}, {GGML_TYPE_Q2_K, GGML_TYPE_IQ2_S},
+        {GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M}, {GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ1_S},
+        {GGML_TYPE_IQ2_XXS, GGML_TYPE_Q2_K}, {GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S},
+        {GGML_TYPE_IQ1_M, GGML_TYPE_IQ2_XXS}, {GGML_TYPE_IQ1_S, GGML_TYPE_Q2_K},
+        {GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ2_S}, {GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ2_XS},
+        {GGML_TYPE_Q2_K, GGML_TYPE_IQ2_XS}, {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_S},
+        {GGML_TYPE_IQ1_M, GGML_TYPE_IQ1_S}, {GGML_TYPE_IQ2_S, GGML_TYPE_IQ2_XXS},
+        {GGML_TYPE_IQ2_XS, GGML_TYPE_IQ2_XXS}, {GGML_TYPE_IQ1_M, GGML_TYPE_IQ2_S},
+        {GGML_TYPE_IQ1_S, GGML_TYPE_IQ2_S}, {GGML_TYPE_IQ1_S, GGML_TYPE_IQ2_XS},
+        {GGML_TYPE_IQ2_XS, GGML_TYPE_Q2_K}, {GGML_TYPE_Q4_K, GGML_TYPE_IQ2_S},
+        {GGML_TYPE_IQ2_XS, GGML_TYPE_IQ2_S}, {GGML_TYPE_Q2_K, GGML_TYPE_IQ1_S},
+        {GGML_TYPE_IQ2_S, GGML_TYPE_IQ2_XS}, {GGML_TYPE_IQ2_S, GGML_TYPE_Q2_K},
+        {GGML_TYPE_Q2_K, GGML_TYPE_IQ2_XXS}, {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS},
+        {GGML_TYPE_IQ3_S, GGML_TYPE_IQ2_S}, {GGML_TYPE_IQ3_S, GGML_TYPE_IQ3_XXS},
+        {GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ2_S}, {GGML_TYPE_Q2_K, GGML_TYPE_IQ4_XS},
+        {GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_XS}, {GGML_TYPE_IQ4_XS, GGML_TYPE_Q2_K},
+    };
+    for (const auto & types : mixed_gate_types) {
+        for (bool use_id : {false, true}) {
+            for (bool bias : {false, true}) {
+                for (bool broadcast : {false, true}) {
+                    if (!use_id && broadcast) {
+                        continue;
+                    }
+                    test_cases.emplace_back(new test_quant_gate_up(types.first, types.second,
+                        -1, use_id, broadcast, bias, GGML_GLU_OP_SWIGLU));
+                }
+            }
+        }
+    }
+    for (ggml_type type : {GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_IQ3_XXS, GGML_TYPE_MXFP4}) {
+        for (bool use_id : {false, true}) {
+            for (bool bias : {false, true}) {
+                for (bool broadcast : {false, true}) {
+                    if (!use_id && broadcast) {
+                        continue;
+                    }
+                    for (int layout : {0, 1, 2, 3}) {
+                        for (ggml_glu_op glu_op : {GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU,
+                                                  GGML_GLU_OP_SWIGLU_OAI, GGML_GLU_OP_SWIGLU_CLAMP}) {
+                            if (layout < 2 && (glu_op == GGML_GLU_OP_SWIGLU_OAI || glu_op == GGML_GLU_OP_SWIGLU_CLAMP)) {
+                                continue;
+                            }
+                            test_cases.emplace_back(new test_quant_gate_up(type, type, layout, use_id, broadcast, bias, glu_op));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Scalar prefill covers row tails and the explicit F32 accumulation control.
+    for (ggml_type type : {GGML_TYPE_Q4_0, GGML_TYPE_IQ2_XS, GGML_TYPE_F16}) {
+        for (ggml_prec prec : {GGML_PREC_DEFAULT, GGML_PREC_F32}) {
+            for (int64_t tokens : {127, 128, 129}) {
+                test_cases.emplace_back(new test_mul_mat_prefill(type, tokens, prec));
+            }
+        }
+    }
+
+    // Mixed types, another consumer, padded weight rows, and outputs keep the unfused path.
+    for (bool broadcast_dim3 : {false, true}) {
+        test_cases.emplace_back(new test_gate_up_bias_broadcast(broadcast_dim3));
+    }
+    for (int variant : {0, 1, 2, 3}) {
+        test_cases.emplace_back(new test_gate_up_fallback(variant));
+    }
+
+    // Quantized gate/up decode: odd row tails and more than one weight block.
+    for (ggml_type type : {GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, GGML_TYPE_Q2_K, GGML_TYPE_Q3_K,
+                          GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M,
+                          GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ2_XS, GGML_TYPE_IQ2_S,
+                          GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_NL,
+                          GGML_TYPE_IQ4_XS, GGML_TYPE_MXFP4}) {
+        for (ggml_glu_op glu_op : {GGML_GLU_OP_REGLU, GGML_GLU_OP_SWIGLU, GGML_GLU_OP_GEGLU,
+                                  GGML_GLU_OP_GEGLU_ERF, GGML_GLU_OP_GEGLU_QUICK,
+                                  GGML_GLU_OP_SWIGLU_OAI, GGML_GLU_OP_SWIGLU_CLAMP}) {
+            for (int64_t rows : {31, 33}) {
+                test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, rows, 768,
+                    false, 1, 1, false, false, true, false, {1, 1}));
+                for (bool broadcast : {false, true}) {
+                    test_cases.emplace_back(new test_mul_mat_vec_fusion(type, glu_op, 1, rows, 768,
+                        true, 4, 2, broadcast, false, true, false, {1, 1}));
+                }
+            }
+        }
     }
 
     // Fused row-pair coverage: minimum rows, an even pair, and an odd tail.

@@ -31,6 +31,25 @@ struct vk_mat_vec_push_constants {
     uint32_t broadcast3;
 };
 
+struct vk_gate_up_push_constants {
+    uint32_t ncols;
+    uint32_t nrows;
+    uint32_t ne02;
+    uint32_t ne12;
+    uint32_t broadcast2;
+    uint32_t broadcast3;
+    uint32_t ne11;
+    uint32_t n_experts;
+    uint32_t glu_op;
+    uint32_t has_bias;
+    uint32_t weight_ne3;
+    uint32_t weight_rows;
+    uint32_t gate_row;
+    uint32_t up_row;
+    float alpha;
+    float limit;
+};
+
 struct vk_mat_vec_p021_push_constants {
     uint32_t ncols_x;
     uint32_t nrows_x;
