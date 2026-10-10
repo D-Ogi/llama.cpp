@@ -2930,16 +2930,23 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     static constexpr uint32_t mul_mat_vec_num_bindings = 5;
     static constexpr uint32_t mul_mat_vec_id_num_bindings = 6;
 
-    if (device->subgroup_arithmetic && !device->disable_gate_up_fusion && !device->disable_fusion) {
+    if (device->subgroup_arithmetic && !device->disable_fusion &&
+        (!device->disable_gate_up_fusion[0] || !device->disable_gate_up_fusion[1])) {
         const uint32_t rows = device->rdna1_tuning && !getenv("GGML_VK_DISABLE_RDNA1_ROWS") ? 4u : 2u;
         const uint32_t width = std::max(16u, subgroup_size);
-#define CREATE_GATE_UP(TYPE, name) \
+#define CREATE_GATE_UP(TYPE, name) do { \
+        const uint32_t dequant = GGML_TYPE_##TYPE == GGML_TYPE_MXFP4 ? device->mxfp4_dequant_tuning : device->dequant_tuning; \
+        if (!device->disable_gate_up_fusion[0]) { \
         ggml_vk_create_pipeline(device, device->pipeline_gate_up[0][GGML_TYPE_##TYPE][GGML_TYPE_##TYPE], "gate_up_" #name, \
             gate_up_##name##_len, gate_up_##name##_data, "main", 7, sizeof(vk_gate_up_push_constants), \
-            {rows, 1, 1}, {width, rows, 1, uint32_t(device->dequant_tuning)}, 1, true, true, force_subgroup_size); \
+            {rows, 1, 1}, {width, rows, 1, dequant}, 1, true, true, force_subgroup_size); \
+        } \
+        if (!device->disable_gate_up_fusion[1]) { \
         ggml_vk_create_pipeline(device, device->pipeline_gate_up[1][GGML_TYPE_##TYPE][GGML_TYPE_##TYPE], "gate_up_id_" #name, \
             gate_up_id_##name##_len, gate_up_id_##name##_data, "main", 7, sizeof(vk_gate_up_push_constants), \
-            {rows, 1, 1}, {width, rows, 1, uint32_t(device->dequant_tuning)}, 1, true, true, force_subgroup_size)
+            {rows, 1, 1}, {width, rows, 1, dequant}, 1, true, true, force_subgroup_size); \
+        } \
+    } while (false)
         CREATE_GATE_UP(Q4_0, q4_0);
         CREATE_GATE_UP(Q8_0, q8_0);
         CREATE_GATE_UP(Q2_K, q2_k);
@@ -2964,12 +2971,16 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         // the ordinary two-matmul path.
 #define CREATE_GATE_UP_PAIR(G, g, U, u) \
         if (GGML_TYPE_##G != GGML_TYPE_##U) { \
+            if (!device->disable_gate_up_fusion[0]) { \
             ggml_vk_create_pipeline(device, device->pipeline_gate_up[0][GGML_TYPE_##G][GGML_TYPE_##U], "gate_up_" #g "_" #u, \
                 gate_up_##g##_##u##_len, gate_up_##g##_##u##_data, "main", 7, sizeof(vk_gate_up_push_constants), \
                 {rows, 1, 1}, {width, rows, 1, uint32_t(device->dequant_tuning)}, 1, true, true, force_subgroup_size); \
+            } \
+            if (!device->disable_gate_up_fusion[1]) { \
             ggml_vk_create_pipeline(device, device->pipeline_gate_up[1][GGML_TYPE_##G][GGML_TYPE_##U], "gate_up_id_" #g "_" #u, \
                 gate_up_id_##g##_##u##_len, gate_up_id_##g##_##u##_data, "main", 7, sizeof(vk_gate_up_push_constants), \
                 {rows, 1, 1}, {width, rows, 1, uint32_t(device->dequant_tuning)}, 1, true, true, force_subgroup_size); \
+            } \
         }
 #define CREATE_GATE_UP_ROW(G, g) \
         CREATE_GATE_UP_PAIR(G, g, Q2_K, q2_k) \
@@ -3043,7 +3054,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f32_f32[w][GGML_TYPE_IQ3_S][i],   "mul_mat_vec_iq3_s_f32_f32",   arr_dmmv_iq3_s_f32_f32_len[reduc16],   arr_dmmv_iq3_s_f32_f32_data[reduc16],   "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f32_f32[w][GGML_TYPE_IQ4_XS][i],  "mul_mat_vec_iq4_xs_f32_f32",  arr_dmmv_iq4_xs_f32_f32_len[reduc16],  arr_dmmv_iq4_xs_f32_f32_data[reduc16],  "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f32_f32[w][GGML_TYPE_IQ4_NL][i],  "mul_mat_vec_iq4_nl_f32_f32",  arr_dmmv_iq4_nl_f32_f32_len[reduc16],  arr_dmmv_iq4_nl_f32_f32_data[reduc16],  "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
-            ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f32_f32[w][GGML_TYPE_MXFP4][i],   "mul_mat_vec_mxfp4_f32_f32",   OCP_DMMV_LEN(arr_dmmv_mxfp4_f32_f32, reduc16), OCP_DMMV_DATA(arr_dmmv_mxfp4_f32_f32, reduc16), "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
+            ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f32_f32[w][GGML_TYPE_MXFP4][i],   "mul_mat_vec_mxfp4_f32_f32",   OCP_DMMV_LEN(arr_dmmv_mxfp4_f32_f32, reduc16), OCP_DMMV_DATA(arr_dmmv_mxfp4_f32_f32, reduc16), "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->mxfp4_dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f32_f32[w][GGML_TYPE_NVFP4][i],   "mul_mat_vec_nvfp4_f32_f32",   OCP_DMMV_LEN(arr_dmmv_nvfp4_f32_f32, reduc16), OCP_DMMV_DATA(arr_dmmv_nvfp4_f32_f32, reduc16), "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
 
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f16_f32[w][GGML_TYPE_F32 ][i], "mul_mat_vec_f32_f16_f32",  arr_dmmv_f32_f16_f32_len[reduc],  arr_dmmv_f32_f16_f32_data[reduc],  "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1, 1, 1}, {wg_size_subgroup, 1, i+1, uint32_t(device->dequant_tuning)}, 1, false, use_subgroups, force_subgroup_size);
@@ -3072,7 +3083,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f16_f32[w][GGML_TYPE_IQ3_S][i],   "mul_mat_vec_iq3_s_f16_f32",   arr_dmmv_iq3_s_f16_f32_len[reduc16],   arr_dmmv_iq3_s_f16_f32_data[reduc16],   "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f16_f32[w][GGML_TYPE_IQ4_XS][i],  "mul_mat_vec_iq4_xs_f16_f32",  arr_dmmv_iq4_xs_f16_f32_len[reduc16],  arr_dmmv_iq4_xs_f16_f32_data[reduc16],  "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f16_f32[w][GGML_TYPE_IQ4_NL][i],  "mul_mat_vec_iq4_nl_f16_f32",  arr_dmmv_iq4_nl_f16_f32_len[reduc16],  arr_dmmv_iq4_nl_f16_f32_data[reduc16],  "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
-            ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f16_f32[w][GGML_TYPE_MXFP4][i],   "mul_mat_vec_mxfp4_f16_f32",   OCP_DMMV_LEN(arr_dmmv_mxfp4_f16_f32, reduc16), OCP_DMMV_DATA(arr_dmmv_mxfp4_f16_f32, reduc16), "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
+            ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f16_f32[w][GGML_TYPE_MXFP4][i],   "mul_mat_vec_mxfp4_f16_f32",   OCP_DMMV_LEN(arr_dmmv_mxfp4_f16_f32, reduc16), OCP_DMMV_DATA(arr_dmmv_mxfp4_f16_f32, reduc16), "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->mxfp4_dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f16_f32[w][GGML_TYPE_NVFP4][i],   "mul_mat_vec_nvfp4_f16_f32",   OCP_DMMV_LEN(arr_dmmv_nvfp4_f16_f32, reduc16), OCP_DMMV_DATA(arr_dmmv_nvfp4_f16_f32, reduc16), "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
 
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
@@ -3087,7 +3098,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q5_1][i], "mul_mat_vec_q5_1_q8_1_f32", arr_dmmv_q5_1_q8_1_f32_len[reduc], arr_dmmv_q5_1_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_stdq_int, i), i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q8_0][i], "mul_mat_vec_q8_0_q8_1_f32", arr_dmmv_q8_0_q8_1_f32_len[reduc], arr_dmmv_q8_0_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_stdq_int, i), i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
 
-                ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_MXFP4][i], "mul_mat_vec_mxfp4_q8_1_f32", arr_dmmv_mxfp4_q8_1_f32_len[reduc], arr_dmmv_mxfp4_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(2*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(2*rm_stdq_int, i), i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
+                ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_MXFP4][i], "mul_mat_vec_mxfp4_q8_1_f32", arr_dmmv_mxfp4_q8_1_f32_len[reduc], arr_dmmv_mxfp4_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(2*rm_stdq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(2*rm_stdq_int, i), i+1, uint32_t(device->mxfp4_dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
 
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q2_K][i], "mul_mat_vec_q2_k_q8_1_f32", arr_dmmv_q2_k_q8_1_f32_len[reduc], arr_dmmv_q2_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(2*rm_kq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(2*rm_kq_int, i), i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
                 ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q8_1_f32[w][GGML_TYPE_Q3_K][i], "mul_mat_vec_q3_k_q8_1_f32", arr_dmmv_q3_k_q8_1_f32_len[reduc], arr_dmmv_q3_k_q8_1_f32_data[reduc], "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {rm_int_n(1*rm_kq_int, i), 1, 1}, {wg_size_subgroup_int, rm_int_n(1*rm_kq_int, i), i+1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
@@ -3129,7 +3140,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_f32[w][GGML_TYPE_IQ3_S],   "mul_mat_vec_id_iq3_s_f32",   arr_dmmv_id_iq3_s_f32_f32_len[reduc16],   arr_dmmv_id_iq3_s_f32_f32_data[reduc16],   "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
         ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_f32[w][GGML_TYPE_IQ4_XS],  "mul_mat_vec_id_iq4_xs_f32",  arr_dmmv_id_iq4_xs_f32_f32_len[reduc16],  arr_dmmv_id_iq4_xs_f32_f32_data[reduc16],  "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
         ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_f32[w][GGML_TYPE_IQ4_NL],  "mul_mat_vec_id_iq4_nl_f32",  arr_dmmv_id_iq4_nl_f32_f32_len[reduc16],  arr_dmmv_id_iq4_nl_f32_f32_data[reduc16],  "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
-        ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_f32[w][GGML_TYPE_MXFP4],   "mul_mat_vec_id_mxfp4_f32",   OCP_DMMV_LEN(arr_dmmv_id_mxfp4_f32_f32, reduc16), OCP_DMMV_DATA(arr_dmmv_id_mxfp4_f32_f32, reduc16), "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
+        ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_f32[w][GGML_TYPE_MXFP4],   "mul_mat_vec_id_mxfp4_f32",   OCP_DMMV_LEN(arr_dmmv_id_mxfp4_f32_f32, reduc16), OCP_DMMV_DATA(arr_dmmv_id_mxfp4_f32_f32, reduc16), "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, 1, uint32_t(device->mxfp4_dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
         ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_f32[w][GGML_TYPE_NVFP4],   "mul_mat_vec_id_nvfp4_f32",   OCP_DMMV_LEN(arr_dmmv_id_nvfp4_f32_f32, reduc16), OCP_DMMV_DATA(arr_dmmv_id_nvfp4_f32_f32, reduc16), "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_iq, 1, 1}, {wg_size_subgroup16, rm_iq, 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups16, force_subgroup_size16);
 
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
@@ -3144,7 +3155,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q5_1], "mul_mat_vec_id_q5_1_q8_1_f32", arr_dmmv_id_q5_1_q8_1_f32_len[reduc], arr_dmmv_id_q5_1_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_id(1*rm_stdq_int), 1, 1}, {wg_size_subgroup_int, rm_id(1*rm_stdq_int), 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q8_0], "mul_mat_vec_id_q8_0_q8_1_f32", arr_dmmv_id_q8_0_q8_1_f32_len[reduc], arr_dmmv_id_q8_0_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_id(1*rm_stdq_int), 1, 1}, {wg_size_subgroup_int, rm_id(1*rm_stdq_int), 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
 
-            ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_MXFP4], "mul_mat_vec_id_mxfp4_q8_1_f32", arr_dmmv_id_mxfp4_q8_1_f32_len[reduc], arr_dmmv_id_mxfp4_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_id(2*rm_stdq_int), 1, 1}, {wg_size_subgroup_int, rm_id(2*rm_stdq_int), 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
+            ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_MXFP4], "mul_mat_vec_id_mxfp4_q8_1_f32", arr_dmmv_id_mxfp4_q8_1_f32_len[reduc], arr_dmmv_id_mxfp4_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_id(2*rm_stdq_int), 1, 1}, {wg_size_subgroup_int, rm_id(2*rm_stdq_int), 1, uint32_t(device->mxfp4_dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
 
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q2_K], "mul_mat_vec_id_q2_k_q8_1_f32", arr_dmmv_id_q2_k_q8_1_f32_len[reduc], arr_dmmv_id_q2_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_id(2*rm_kq_int), 1, 1}, {wg_size_subgroup_int, rm_id(2*rm_kq_int), 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_id_q8_1_f32[w][GGML_TYPE_Q3_K], "mul_mat_vec_id_q3_k_q8_1_f32", arr_dmmv_id_q3_k_q8_1_f32_len[reduc], arr_dmmv_id_q3_k_q8_1_f32_data[reduc], "main", mul_mat_vec_id_num_bindings, sizeof(vk_mat_vec_id_push_constants), {rm_id(1*rm_kq_int), 1, 1}, {wg_size_subgroup_int, rm_id(1*rm_kq_int), 1, uint32_t(device->dequant_tuning)}, 1, true, use_subgroups, subgroup_size_int);
@@ -4959,10 +4970,11 @@ vk_device ggml_vk_get_device(size_t idx) {
 
         device->rdna1_tuning = device->architecture == AMD_RDNA1 || getenv("GGML_VK_RDNA1_TUNING") != nullptr;
         device->dequant_tuning = device->rdna1_tuning && !getenv("GGML_VK_DISABLE_DEQUANT_TUNING");
+        device->mxfp4_dequant_tuning = device->dequant_tuning && getenv("GGML_VK_ENABLE_MXFP4_DEQUANT_TUNING") != nullptr;
         device->disable_fusion = getenv("GGML_VK_DISABLE_FUSION") != nullptr;
-        // RDNA1 model measurements favor separate projections; keep fusion opt-in.
-        device->disable_gate_up_fusion = !device->rdna1_tuning || !getenv("GGML_VK_ENABLE_GATE_UP_FUSION") ||
-                                        getenv("GGML_VK_DISABLE_GATE_UP_FUSION") != nullptr;
+        // RDNA1 measurements favor expert fusion, but separate dense projections and the MXFP4 LUT.
+        device->disable_gate_up_fusion[1] = !device->rdna1_tuning || getenv("GGML_VK_DISABLE_GATE_UP_FUSION") != nullptr;
+        device->disable_gate_up_fusion[0] = device->disable_gate_up_fusion[1] || !getenv("GGML_VK_ENABLE_GATE_UP_FUSION");
         ggml_vk_load_shaders(device);
 
         // Prefer a dedicated transfer queue on AMD dGPUs (non-GCN) when graphics queue use is disabled.
@@ -4995,11 +5007,14 @@ vk_device ggml_vk_get_device(size_t idx) {
 
         device->serialize_submissions = getenv("GGML_VK_SERIALIZE_SUBMISSIONS") != nullptr;
 
-        GGML_LOG_INFO("ggml_vulkan: %s: detected_rdna1=%u rdna1_rows=%u dequant_tuning=%u gate_up_fusion=%u packed_f16=%u\n",
+        const bool gate_up_dense = !device->disable_fusion && !device->disable_gate_up_fusion[0] && device->subgroup_arithmetic;
+        const bool gate_up_expert = !device->disable_fusion && !device->disable_gate_up_fusion[1] && device->subgroup_arithmetic;
+        GGML_LOG_INFO("ggml_vulkan: %s: detected_rdna1=%u rdna1_rows=%u dequant_tuning=%u gate_up_fusion=%u packed_f16=%u gate_up_dense=%u gate_up_expert=%u mxfp4_dequant=%u\n",
             device->name.c_str(), unsigned(device->architecture == AMD_RDNA1),
             unsigned(device->rdna1_tuning && !getenv("GGML_VK_DISABLE_RDNA1_ROWS")),
-            unsigned(device->dequant_tuning), unsigned(!device->disable_fusion && !device->disable_gate_up_fusion && device->subgroup_arithmetic),
-            unsigned(device->rdna1_tuning && !device->coopmat_support && !getenv("GGML_VK_DISABLE_RDNA1_PACKED_F16")));
+            unsigned(device->dequant_tuning), unsigned(gate_up_dense || gate_up_expert),
+            unsigned(device->rdna1_tuning && !device->coopmat_support && !getenv("GGML_VK_DISABLE_RDNA1_PACKED_F16")),
+            unsigned(gate_up_dense), unsigned(gate_up_expert), unsigned(device->mxfp4_dequant_tuning));
 
         device->disable_descriptor_reuse = getenv("GGML_VK_DISABLE_DESCRIPTOR_REUSE") != nullptr;
 
@@ -12411,7 +12426,8 @@ static vk_gate_up_match ggml_vk_match_gate_up(const ggml_cgraph * graph, int idx
 }
 
 static int ggml_vk_can_fuse_gate_up(const ggml_backend_vk_context * ctx, const ggml_cgraph * graph, int idx) {
-    if (ctx->device->disable_gate_up_fusion || !ctx->device->subgroup_arithmetic || idx + 1 >= graph->n_nodes) {
+    if ((ctx->device->disable_gate_up_fusion[0] && ctx->device->disable_gate_up_fusion[1]) ||
+        !ctx->device->subgroup_arithmetic || idx + 1 >= graph->n_nodes) {
         return 0;
     }
     const auto m = ggml_vk_match_gate_up(graph, idx);
@@ -12421,6 +12437,9 @@ static int ggml_vk_can_fuse_gate_up(const ggml_backend_vk_context * ctx, const g
     const ggml_tensor * gate_mm = m.mm[0];
     const ggml_tensor * up_mm = m.mm[1];
     const bool use_id = gate_mm->op == GGML_OP_MUL_MAT_ID;
+    if (ctx->device->disable_gate_up_fusion[use_id]) {
+        return 0;
+    }
     if (gate_mm->src[1] != up_mm->src[1] || (use_id && gate_mm->src[2] != up_mm->src[2])) {
         return 0;
     }
@@ -15136,8 +15155,12 @@ void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * graph, 
         };
 
         bool kept_gate_up = false;
-        if (!ctx->device->disable_fusion && !ctx->device->disable_gate_up_fusion) {
+        if (!ctx->device->disable_fusion &&
+            (!ctx->device->disable_gate_up_fusion[0] || !ctx->device->disable_gate_up_fusion[1])) {
             for (const auto & pattern : gate_up_patterns) {
+                if (ctx->device->disable_gate_up_fusion[*pattern.begin() == GGML_OP_MUL_MAT_ID]) {
+                    continue;
+                }
                 if (match_pattern(pattern, first_unused)) {
                     add_pattern_alloc_deps(pattern, first_unused + int(pattern.size()) - 1);
                     kept_gate_up = keep_pattern(pattern);

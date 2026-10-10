@@ -1954,7 +1954,7 @@ float ue4m3_to_fp32_build(uint u) {
 #define NEEDS_INIT_IQ_SHMEM
 void init_fp4_shmem(uvec3 wgsize)
 {
-#if defined(MAT_VEC_DEQUANT_TUNING) && defined(DATA_A_MXFP4)
+#if defined(MAT_VEC_DEQUANT_TUNING) && defined(DATA_A_MXFP4) && !defined(MMQ)
     if (DEQUANT_OPT) {
         return;
     }
